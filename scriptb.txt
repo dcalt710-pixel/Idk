@@ -1,0 +1,595 @@
+﻿--=====================================================================
+--  GAMEPASS FAKER + ВЕРДИКТ  ·  GUI  ·  без Description
+--  Delta / любой executor
+--=====================================================================
+
+local Players            = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local UserInputService   = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local HttpService        = game:GetService("HttpService")
+
+local LP = Players.LocalPlayer
+local ms = MarketplaceService
+
+local DEFAULT_ID = 2002562591
+local SHOW_PRODUCTS = true
+local CAT_IMAGE = "rbxassetid://6050149849"
+
+--============================ ядро ============================
+
+local function fireGamepass(id) pcall(function() ms:SignalPromptGamePassPurchaseFinished(LP, id, true) end) end
+local function fireProduct(id)  pcall(function() ms:SignalPromptProductPurchaseFinished(LP.UserId, id, true) end) end
+local function fireAsset(id)    pcall(function() ms:SignalPromptPurchaseFinished(LP, id, true) end) end
+
+local function fire(id, kind)
+	id = tonumber(id)
+	if not id then return false end
+	if kind == "Gamepass" then fireGamepass(id)
+	elseif kind == "Product" then fireProduct(id)
+	else fireGamepass(id); fireProduct(id); fireAsset(id) end
+	return true
+end
+
+--============================ http ============================
+
+local function httpGet(url)
+	local ok, res = pcall(function()
+		if typeof(request) == "function" then return request({Url = url, Method = "GET"}).Body end
+		if typeof(http_request) == "function" then return http_request({Url = url, Method = "GET"}).Body end
+		if typeof(syn) == "table" and syn.request then return syn.request({Url = url}).Body end
+		if typeof(http) == "table" and http.request then return http.request({Url = url}).Body end
+		return game:HttpGet(url)
+	end)
+	if ok and type(res) == "string" and #res > 2 then return res end
+	return nil
+end
+
+local function getJson(url)
+	local body = httpGet(url)
+	if body then
+		local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+		if ok and type(data) == "table" and not data.errors then return data end
+	end
+	local alt = url:gsub("^https://games%.roblox%.com", "https://games.roproxy.com")
+		:gsub("^https://apis%.roblox%.com", "https://apis.roproxy.com")
+	if alt ~= url then
+		local b2 = httpGet(alt)
+		if b2 then
+			local ok, data = pcall(function() return HttpService:JSONDecode(b2) end)
+			if ok and type(data) == "table" and not data.errors then return data end
+		end
+	end
+	return nil
+end
+
+local function fetchPasses()
+	local out, cursor = {}, nil
+	for _ = 1, 10 do
+		local url = "https://games.roblox.com/v1/games/" .. tostring(game.GameId) ..
+			"/game-passes?limit=100&sortOrder=Asc"
+		if cursor and cursor ~= "" then url = url .. "&cursor=" .. cursor end
+		local data = getJson(url)
+		if not data or type(data.gamePasses) ~= "table" then break end
+		for _, p in ipairs(data.gamePasses) do
+			if p.id then
+				out[#out + 1] = {
+					id = p.id, name = p.name or ("Pass " .. tostring(p.id)),
+					price = tonumber(p.price) or 0, kind = "Gamepass",
+					icon = "rbxthumb://type=GamePass&id=" .. tostring(p.id) .. "&w=150&h=150",
+				}
+			end
+		end
+		cursor = data.nextPageCursor
+		if not cursor or cursor == "" then break end
+	end
+	return out
+end
+
+local function fetchProducts()
+	local out = {}
+	local ok, pages = pcall(function() return ms:GetDeveloperProductsAsync() end)
+	if ok and pages then
+		pcall(function()
+			while true do
+				for _, p in ipairs(pages:GetCurrentPage()) do
+					out[#out + 1] = {id = p.ProductId, name = p.Name or ("Product " .. tostring(p.ProductId)),
+						price = tonumber(p.PriceInRobux) or 0, kind = "Product"}
+				end
+				if pages.IsFinished then break end
+				pages:AdvanceToNextPageAsync()
+			end
+		end)
+		if #out > 0 then return out end
+	end
+	local page = 1
+	for _ = 1, 10 do
+		local data = getJson("https://apis.roblox.com/developer-products/v2/universes/" ..
+			tostring(game.GameId) .. "/developerproducts?limit=100&page=" .. tostring(page))
+		if not data or type(data.developerProducts) ~= "table" then break end
+		for _, p in ipairs(data.developerProducts) do
+			local pid = p.productId or p.id
+			if pid then
+				out[#out + 1] = {id = pid, name = p.name or ("Product " .. tostring(pid)),
+					price = tonumber(p.priceInRobux) or 0, kind = "Product"}
+			end
+		end
+		page = page + 1
+		if page > (tonumber(data.totalPages) or 1) then break end
+	end
+	return out
+end
+
+--============================ палитра / хелперы ============================
+
+local COL = {
+	bg = Color3.fromRGB(22, 22, 29), panel = Color3.fromRGB(32, 32, 41),
+	soft = Color3.fromRGB(46, 46, 58), line = Color3.fromRGB(60, 60, 76),
+	text = Color3.fromRGB(240, 240, 246), dim = Color3.fromRGB(148, 148, 168),
+	accent = Color3.fromRGB(255, 150, 80), blue = Color3.fromRGB(130, 200, 255),
+	green = Color3.fromRGB(125, 220, 155), shadow = Color3.fromRGB(0, 0, 0),
+}
+
+local function corner(o, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = o; return c end
+local function stroke(o, col, th)
+	local s = Instance.new("UIStroke"); s.Color = col or COL.line; s.Thickness = th or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = o; return s
+end
+local function pad(o, l, r, t, b)
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, l or 0); p.PaddingRight = UDim.new(0, r or 0)
+	p.PaddingTop = UDim.new(0, t or 0); p.PaddingBottom = UDim.new(0, b or 0); p.Parent = o
+end
+
+local function drag(frame, handle, onClick)
+	handle = handle or frame
+	local dragging, moved, startPos, startInput = false, false, nil, nil
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging, moved = true, false
+			startInput, startPos = input.Position, frame.Position
+			local conn
+			conn = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false; conn:Disconnect()
+					if onClick and not moved then onClick() end
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			local d = input.Position - startInput
+			if math.abs(d.X) + math.abs(d.Y) > 6 then moved = true end
+			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+				startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end)
+end
+
+local function makeButton(parent, text, size, pos, col, hover, textCol, textSize, radius)
+	local b = Instance.new("TextButton")
+	b.Size, b.Position = size, pos
+	b.BackgroundColor3 = col; b.BorderSizePixel = 0; b.Text = text
+	b.TextColor3 = textCol or COL.text; b.Font = Enum.Font.GothamBold
+	b.TextSize = textSize or 13; b.AutoButtonColor = false; b.Parent = parent
+	corner(b, radius or 9); stroke(b, COL.line)
+	if hover then
+		b.MouseEnter:Connect(function() TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = hover}):Play() end)
+		b.MouseLeave:Connect(function() TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = col}):Play() end)
+	end
+	return b
+end
+
+--=== утилиты для проверки игры ===
+
+local function srcOfConn(c)
+	local ok, s = pcall(function() return c.Script end)
+	if ok and typeof(s) == "Instance" then
+		local ok2, p = pcall(function() return s:GetFullName() end)
+		return ok2 and p or s.Name
+	end
+	local f
+	pcall(function() f = c.Function end)
+	if type(f) == "function" then
+		local ok3, src = pcall(function() return debug.info(f, "s") end)
+		if ok3 and type(src) == "string" then return src end
+	end
+	return "?"
+end
+
+local function isCore(src) return src:find("CoreScripts") ~= nil end
+
+local function gameListeners(sig)
+	if type(getconnections) ~= "function" then return 0, {} end
+	local ok, conns = pcall(getconnections, sig)
+	if not ok or type(conns) ~= "table" then return 0, {} end
+	local n, list = 0, {}
+	for _, c in ipairs(conns) do
+		local src = srcOfConn(c)
+		if not isCore(src) then n = n + 1; list[#list + 1] = c end
+	end
+	return n, list
+end
+
+--============================ окно ============================
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "UniversalFaker"; gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true; gui.DisplayOrder = 9999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+do
+	local ok = false
+	if typeof(gethui) == "function" then ok = pcall(function() gui.Parent = gethui() end) end
+	if not ok then gui.Parent = LP:WaitForChild("PlayerGui") end
+end
+
+local shadow = Instance.new("Frame")
+shadow.Size = UDim2.fromOffset(350, 446)
+shadow.Position = UDim2.new(0.5, -185, 0.5, -211)
+shadow.BackgroundColor3 = COL.shadow; shadow.BackgroundTransparency = 0.55
+shadow.BorderSizePixel = 0; shadow.Parent = gui
+corner(shadow, 18)
+
+local win = Instance.new("Frame")
+win.Size = UDim2.fromOffset(350, 446)
+win.Position = UDim2.new(0.5, -175, 0.5, -223)
+win.BackgroundColor3 = COL.bg; win.BorderSizePixel = 0; win.Parent = gui
+corner(win, 16); stroke(win, COL.line)
+
+local cat = Instance.new("TextButton")
+cat.Size = UDim2.fromOffset(52, 52)
+cat.Position = UDim2.new(0, 22, 0.5, 130)
+cat.BackgroundColor3 = COL.panel; cat.Text = "cat"; cat.TextSize = 11
+cat.TextColor3 = COL.dim; cat.Font = Enum.Font.GothamBold
+cat.AutoButtonColor = false; cat.Visible = false; cat.Parent = gui
+corner(cat, 26); stroke(cat, COL.accent, 2)
+
+local catImg = Instance.new("ImageLabel")
+catImg.Size = UDim2.fromScale(0.74, 0.74); catImg.Position = UDim2.fromScale(0.13, 0.13)
+catImg.BackgroundTransparency = 1; catImg.Image = CAT_IMAGE; catImg.Parent = cat
+corner(catImg, 22)
+
+local function showWindow(state)
+	win.Visible = state; shadow.Visible = state; cat.Visible = not state
+	if state then
+		win.Size = UDim2.fromOffset(340, 440)
+		TweenService:Create(win, TweenInfo.new(0.14), {Size = UDim2.fromOffset(350, 446)}):Play()
+	end
+end
+
+drag(win, win)
+drag(cat, cat, function() showWindow(true) end)
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 54); header.BackgroundColor3 = Color3.fromRGB(40, 37, 54)
+header.BorderSizePixel = 0; header.Active = true; header.Parent = win
+corner(header, 16)
+local grad = Instance.new("UIGradient")
+grad.Rotation = 15
+grad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(48, 42, 70)),
+	ColorSequenceKeypoint.new(0.55, Color3.fromRGB(60, 44, 62)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 48, 52)),
+})
+grad.Parent = header
+
+local avatar = Instance.new("ImageLabel")
+avatar.Size = UDim2.fromOffset(34, 34); avatar.Position = UDim2.new(0, 14, 0.5, -17)
+avatar.BackgroundColor3 = COL.soft; avatar.BackgroundTransparency = 0.2
+avatar.BorderSizePixel = 0; avatar.Image = CAT_IMAGE; avatar.Parent = header
+corner(avatar, 11)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -150, 0, 18); title.Position = UDim2.new(0, 58, 0, 11)
+title.BackgroundTransparency = 1; title.Text = "Gamepass Faker"
+title.TextColor3 = COL.text; title.Font = Enum.Font.GothamBold; title.TextSize = 15
+title.TextXAlignment = Enum.TextXAlignment.Left; title.Parent = header
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -150, 0, 14); subtitle.Position = UDim2.new(0, 58, 0, 29)
+subtitle.BackgroundTransparency = 1; subtitle.Text = "пассы текущей игры"
+subtitle.TextColor3 = COL.dim; subtitle.Font = Enum.Font.Gotham; subtitle.TextSize = 11
+subtitle.TextXAlignment = Enum.TextXAlignment.Left; subtitle.Parent = header
+
+local btnHide  = makeButton(header, "—", UDim2.fromOffset(26, 26), UDim2.new(1, -70, 0.5, -13), COL.soft, COL.line)
+local btnClose = makeButton(header, "✕", UDim2.fromOffset(26, 26), UDim2.new(1, -38, 0.5, -13), COL.soft, COL.line, COL.accent)
+btnHide.Activated:Connect(function() showWindow(false) end)
+btnClose.Activated:Connect(function() showWindow(false) end)
+
+-- ПЛАШКА ВЕРДИКТА
+local verdict = Instance.new("TextLabel")
+verdict.Size = UDim2.new(1, -28, 0, 28)
+verdict.Position = UDim2.new(0, 14, 0, 60)
+verdict.BackgroundColor3 = COL.soft; verdict.BorderSizePixel = 0
+verdict.Text = "проверяю игру…"; verdict.TextColor3 = COL.dim
+verdict.Font = Enum.Font.GothamBold; verdict.TextSize = 13
+verdict.Parent = win
+corner(verdict, 9)
+
+-- поле ID + кнопки
+local input = Instance.new("TextBox")
+input.Size = UDim2.fromOffset(154, 34); input.Position = UDim2.new(0, 14, 0, 96)
+input.BackgroundColor3 = COL.panel; input.BorderSizePixel = 0
+input.Text = tostring(DEFAULT_ID); input.PlaceholderText = "ID пасса"
+input.PlaceholderColor3 = COL.dim; input.TextColor3 = COL.text
+input.Font = Enum.Font.GothamMedium; input.TextSize = 13
+input.TextXAlignment = Enum.TextXAlignment.Left; input.ClearTextOnFocus = false
+input.Parent = win; corner(input, 9); stroke(input, COL.line); pad(input, 10)
+
+local btnReset = makeButton(win, "RESET", UDim2.fromOffset(64, 34), UDim2.new(0, 176, 0, 96), COL.soft, COL.line, COL.blue, 12)
+local btnFire  = makeButton(win, "FIRE", UDim2.fromOffset(88, 34), UDim2.new(0, 248, 0, 96), COL.accent, Color3.fromRGB(255, 178, 120), Color3.fromRGB(30, 18, 8), 14)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -28, 0, 16); status.Position = UDim2.new(0, 14, 0, 136)
+status.BackgroundTransparency = 1; status.Text = "жми RESET чтобы подтянуть пассы"
+status.TextColor3 = COL.dim; status.Font = Enum.Font.Gotham; status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextTruncate = Enum.TextTruncate.AtEnd; status.Parent = win
+
+local list = Instance.new("ScrollingFrame")
+list.Position = UDim2.new(0, 14, 0, 158)
+list.Size = UDim2.new(1, -28, 1, -216)
+list.BackgroundColor3 = COL.panel; list.BackgroundTransparency = 0.45
+list.BorderSizePixel = 0; list.ScrollBarThickness = 4
+list.ScrollBarImageColor3 = COL.soft; list.CanvasSize = UDim2.new(0, 0, 0, 0)
+list.AutomaticCanvasSize = Enum.AutomaticSize.Y; list.Parent = win
+corner(list, 12); stroke(list, COL.line); pad(list, 5, 5, 6, 6)
+
+local llayout = Instance.new("UIListLayout")
+llayout.Padding = UDim.new(0, 6); llayout.SortOrder = Enum.SortOrder.LayoutOrder
+llayout.Parent = list
+
+local footLeft = Instance.new("TextLabel")
+footLeft.Size = UDim2.new(0.5, -14, 0, 16); footLeft.Position = UDim2.new(0, 14, 1, -34)
+footLeft.BackgroundTransparency = 1; footLeft.Text = "найдено: 0"
+footLeft.TextColor3 = COL.dim; footLeft.Font = Enum.Font.Gotham; footLeft.TextSize = 11
+footLeft.TextXAlignment = Enum.TextXAlignment.Left; footLeft.Parent = win
+
+local footRight = Instance.new("TextLabel")
+footRight.Size = UDim2.new(0.5, -14, 0, 16); footRight.Position = UDim2.new(0.5, 0, 1, -34)
+footRight.BackgroundTransparency = 1; footRight.Text = "клик → в поле · потом FIRE"
+footRight.TextColor3 = COL.dim; footRight.Font = Enum.Font.Gotham; footRight.TextSize = 11
+footRight.TextXAlignment = Enum.TextXAlignment.Right; footRight.Parent = win
+
+--============================ ВЕРДИКТ ============================
+
+local VCOL = {
+	ok      = {bg = Color3.fromRGB(36, 68, 46),  fg = Color3.fromRGB(140, 230, 165)},
+	maybe   = {bg = Color3.fromRGB(72, 62, 34),  fg = Color3.fromRGB(245, 205, 110)},
+	bad     = {bg = Color3.fromRGB(74, 34, 40),  fg = Color3.fromRGB(255, 130, 130)},
+	unknown = {bg = COL.soft,                    fg = COL.dim},
+}
+
+local reactionSeen, hooksInstalled, hooked = false, 0, {}
+local lastVerdict = ""
+
+local function setVerdict(state, text)
+	if reactionSeen and state == "bad" then state, text = "ok", "пойдет нормас — игра ответила" end
+	if text == lastVerdict then return end
+	lastVerdict = text
+	local c = VCOL[state] or VCOL.unknown
+	verdict.Text = text
+	verdict.TextColor3 = c.fg
+	verdict.BackgroundColor3 = c.bg
+	print("[ВЕРДИКТ] " .. text)
+end
+
+local function evaluate()
+	if type(getconnections) ~= "function" then
+		setVerdict("unknown", "getconnections нет — не проверить")
+		return
+	end
+	local g = gameListeners(ms.PromptGamePassPurchaseFinished)
+	local p = gameListeners(ms.PromptProductPurchaseFinished)
+	print(("[ПРОВЕРКА] слушателей игры: gamepass=%d product=%d"):format(g, p))
+	if g > 0 then setVerdict("ok", "пойдет нормас")
+	elseif p > 0 then setVerdict("maybe", "пойдет нормас (только продукты)")
+	else setVerdict("bad", "нахуй игра не подходит") end
+end
+
+local function installHooks()
+	if type(hookfunction) ~= "function" or type(getconnections) ~= "function" then return end
+	local sigs = {
+		Gamepass = ms.PromptGamePassPurchaseFinished,
+		Product = ms.PromptProductPurchaseFinished,
+		Asset = ms.PromptPurchaseFinished,
+	}
+	for name, sig in pairs(sigs) do
+		local _, conns = gameListeners(sig)
+		for _, c in ipairs(conns) do
+			if not hooked[c] then
+				local f
+				pcall(function() f = c.Function end)
+				if type(f) == "function" then
+					local ok = pcall(function()
+						c.Function = hookfunction(f, function(...)
+							reactionSeen = true
+							setVerdict("ok", "пойдет нормас — игра ответила")
+							return f(...)
+						end)
+					end)
+					if ok then hooked[c] = true; hooksInstalled = hooksInstalled + 1 end
+				end
+			end
+		end
+	end
+end
+
+local function installLoggers()
+	if type(hookfunction) ~= "function" then return end
+	pcall(function()
+		hookfunction(ms.UserOwnsGamePassAsync, function(self, userId, passId)
+			local res = ms.UserOwnsGamePassAsync(self, userId, passId)
+			print(("[ВЛАДЕНИЕ] игра спросила пасс %s -> %s"):format(tostring(passId), tostring(res)))
+			return res
+		end)
+	end)
+	pcall(function()
+		hookfunction(ms.PromptGamePassPurchase, function(self, player, passId)
+			print("[ИГРА ПРОМПТИТ] пасс " .. tostring(passId))
+			return ms.PromptGamePassPurchase(self, player, passId)
+		end)
+	end)
+end
+
+--============================ список ============================
+
+local kindOf, rowsById, selected = {}, {}, nil
+local scanning = false
+
+local function paint(row, on)
+	row.BackgroundColor3 = on and COL.soft or COL.panel
+	local s = row:FindFirstChildOfClass("UIStroke")
+	if s then s.Color = on and COL.accent or COL.line end
+end
+
+local function select(id)
+	if selected and rowsById[selected] then paint(rowsById[selected], false) end
+	selected = tostring(id)
+	if rowsById[selected] then paint(rowsById[selected], true) end
+end
+
+local function fill(id, kind)
+	if kind then kindOf[tostring(id)] = kind end
+	input.Text = tostring(id); select(id)
+	status.Text = "ID " .. tostring(id) .. " в поле — жми FIRE"
+	status.TextColor3 = COL.blue
+end
+
+local function clearRows()
+	rowsById, selected = {}, nil
+	for _, ch in ipairs(list:GetChildren()) do
+		if ch:IsA("TextButton") or ch:IsA("TextLabel") then ch:Destroy() end
+	end
+end
+
+local function addRow(d, order)
+	local row = Instance.new("TextButton")
+	row.Size = UDim2.new(1, -10, 0, 46); row.BackgroundColor3 = COL.panel
+	row.BorderSizePixel = 0; row.Text = ""; row.AutoButtonColor = false
+	row.LayoutOrder = order; row.Parent = list
+	corner(row, 10); stroke(row, COL.line)
+
+	local icon = Instance.new("ImageLabel")
+	icon.Size = UDim2.fromOffset(32, 32); icon.Position = UDim2.new(0, 8, 0.5, -16)
+	icon.BackgroundColor3 = COL.soft; icon.BackgroundTransparency = 0.25
+	icon.BorderSizePixel = 0; icon.Image = d.icon or ""; icon.Parent = row
+	corner(icon, 8)
+
+	local nm = Instance.new("TextLabel")
+	nm.Size = UDim2.new(1, -118, 0, 16); nm.Position = UDim2.new(0, 48, 0, 7)
+	nm.BackgroundTransparency = 1; nm.Text = d.name; nm.TextColor3 = COL.text
+	nm.Font = Enum.Font.GothamMedium; nm.TextSize = 13
+	nm.TextXAlignment = Enum.TextXAlignment.Left
+	nm.TextTruncate = Enum.TextTruncate.AtEnd; nm.Parent = row
+
+	local sub = Instance.new("TextLabel")
+	sub.Size = UDim2.new(1, -118, 0, 14); sub.Position = UDim2.new(0, 48, 0, 25)
+	sub.BackgroundTransparency = 1
+	sub.Text = ((d.kind == "Gamepass") and "pass" or "product") .. "  ·  id " .. tostring(d.id)
+	sub.TextColor3 = COL.dim
+	sub.Font = Enum.Font.Gotham; sub.TextSize = 11
+	sub.TextXAlignment = Enum.TextXAlignment.Left
+	sub.TextTruncate = Enum.TextTruncate.AtEnd; sub.Parent = row
+local pr = Instance.new("TextLabel")
+	pr.Size = UDim2.fromOffset(56, 16); pr.Position = UDim2.new(1, -64, 0, 7)
+	pr.BackgroundTransparency = 1
+	pr.Text = (d.price and d.price > 0) and ("R$ " .. tostring(d.price)) or "offsale"
+	pr.TextColor3 = (d.price and d.price > 0) and COL.green or COL.dim
+	pr.Font = Enum.Font.GothamBold; pr.TextSize = 11
+	pr.TextXAlignment = Enum.TextXAlignment.Right; pr.Parent = row
+
+	local cp = makeButton(row, "COPY", UDim2.fromOffset(56, 18), UDim2.new(1, -64, 0, 25), COL.soft, COL.line, COL.blue, 10)
+	cp.Activated:Connect(function()
+		if setclipboard then pcall(setclipboard, tostring(d.id)) end
+		status.Text = "ID " .. tostring(d.id) .. " скопирован"
+		status.TextColor3 = COL.blue
+	end)
+
+	row.MouseEnter:Connect(function() if selected ~= tostring(d.id) then paint(row, true) end end)
+	row.MouseLeave:Connect(function() if selected ~= tostring(d.id) then paint(row, false) end end)
+	row.Activated:Connect(function() fill(d.id, d.kind) end)
+
+	rowsById[tostring(d.id)] = row
+	if d.kind then kindOf[tostring(d.id)] = d.kind end
+	return row
+end
+
+local function scan()
+	if scanning then return end
+	scanning = true
+	clearRows()
+	status.Text = "сканирую пассы и продукты…"
+	status.TextColor3 = COL.blue
+	footLeft.Text = "найдено: 0"
+
+	task.spawn(function()
+		local passes = fetchPasses() or {}
+		local products = SHOW_PRODUCTS and (fetchProducts() or {}) or {}
+
+		local all = {}
+		for _, p in ipairs(passes) do all[#all + 1] = p end
+		for _, p in ipairs(products) do all[#all + 1] = p end
+		table.sort(all, function(a, b) return (a.price or 0) < (b.price or 0) end)
+
+		local n = 0
+		for i, d in ipairs(all) do
+			if d.id then n = n + 1; addRow(d, i) end
+		end
+
+		footLeft.Text = "найдено: " .. n
+		if n > 0 then
+			status.Text = "клик по строке → ID в поле → FIRE"
+			status.TextColor3 = COL.dim
+		else
+			status.Text = "в игре нет пассов/продуктов"
+			status.TextColor3 = COL.accent
+		end
+		scanning = false
+	end)
+end
+
+--============================ кнопки ============================
+
+btnReset.Activated:Connect(function()
+	evaluate()
+	installHooks()
+	scan()
+end)
+
+btnFire.Activated:Connect(function()
+	local id = tonumber((tostring(input.Text):gsub("%s", "")))
+	if not id then
+		status.Text = "нужен числовой ID"
+		status.TextColor3 = COL.accent
+		return
+	end
+	local kind = kindOf[tostring(id)]
+	local ok = fire(id, kind)
+	if ok then
+		status.Text = "FIRE → " .. tostring(id) .. (kind and (" · " .. kind) or "")
+		status.TextColor3 = COL.green
+	else
+		status.Text = "не смог выстрелить"
+		status.TextColor3 = COL.accent
+	end
+end)
+
+--============================ запуск ============================
+
+task.spawn(function()
+	task.wait(0.25)
+	evaluate()
+	installLoggers()
+	installHooks()
+	scan()
+
+	while gui.Parent do
+		task.wait(1.5)
+		installHooks()
+		if not reactionSeen then evaluate() end
+	end
+end)
